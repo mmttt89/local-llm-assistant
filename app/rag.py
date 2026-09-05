@@ -1,6 +1,7 @@
 from pathlib import Path
 from app.embeddings import EmbeddingClient
 import math
+import json
 
 
 class RAG:
@@ -17,6 +18,8 @@ class RAG:
         self._embeddings: list[list[float]] = []
         self._build_index()
 
+    INDEX_PATH = Path("data/rag_index.json")
+
     def load_documents(self) -> list[str]:
         chunks = []
 
@@ -26,6 +29,11 @@ class RAG:
             chunks.extend(file_chunks)
 
         return chunks
+
+    def _document_timestamps(self) -> dict[str, float]:
+        return {
+            file.name: file.stat().st_mtime for file in self.documents_path.glob("*.md")
+        }
 
     def chunk_text(
         self,
@@ -41,11 +49,23 @@ class RAG:
 
         return chunks
 
-    # ---------------------------------------------------------
-    # 2. Create embeddings for our documents
-    # ---------------------------------------------------------
-
+    
+    # Create embeddings for our documents
     def _build_index(self):
+        current_timestamps = self._document_timestamps()
+
+        if self.INDEX_PATH.exists():
+            print("RAG: Loading existing embedding index...")
+            data = json.loads(self.INDEX_PATH.read_text(encoding="utf-8"))
+            saved_timestamps = data.get("documents", {})
+
+            if saved_timestamps == current_timestamps:
+                self._chunks = data["chunks"]
+                self._embeddings = data["embeddings"]
+                print(f"RAG: Loaded {len(self._chunks)} chunks " "from index.")
+                return
+            print("RAG: Documents changed. Rebuilding index...")
+
         self._chunks = self.load_documents()
 
         print(f"RAG: Creating embeddings for " f"{len(self._chunks)} chunks...")
@@ -53,12 +73,27 @@ class RAG:
         self._embeddings = [
             self.embedding_client.embed(chunk) for chunk in self._chunks
         ]
-        print("RAG: Embedding index ready.")
 
-    # ---------------------------------------------------------
-    # 3. Compare two vectors
-    # ---------------------------------------------------------
+        self.INDEX_PATH.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
 
+        self.INDEX_PATH.write_text(
+            json.dumps(
+                {
+                    "documents": current_timestamps,
+                    "chunks": self._chunks,
+                    "embeddings": self._embeddings,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        print("RAG: Embedding index saved.")
+
+
+    # Compare two vectors
     def _cosine_similarity(
         self,
         a: list[float],
@@ -101,8 +136,8 @@ class RAG:
                 scored_chunks.append((similarity, chunk))
 
         scored_chunks.sort(
-                key=lambda item: item[0],
-                reverse=True,
-            )
+            key=lambda item: item[0],
+            reverse=True,
+        )
 
         return [chunk for _, chunk in scored_chunks[:top_k]]

@@ -353,10 +353,10 @@ The project is being developed incrementally.
 * Similarity threshold
 * Basic RAG integration
 * Token and response-time monitoring
+* Persistent embedding index
 
 🔨 Next
 
-* Persistent embedding index
 * Better document chunking
 * Document metadata
 * Improved retrieval/ranking
