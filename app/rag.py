@@ -14,19 +14,27 @@ class RAG:
         self.documents_path = Path(documents_path)
         self.embedding_client = embedding_client or EmbeddingClient()
 
-        self._chunks: list[str] = []
+        self._chunks: list[dict] = []
         self._embeddings: list[list[float]] = []
         self._build_index()
 
     INDEX_PATH = Path("data/rag_index.json")
 
-    def load_documents(self) -> list[str]:
+    def load_documents(self) -> list[dict]:
         chunks = []
 
         for file in self.documents_path.glob("*.md"):
             content = file.read_text(encoding="utf-8")
             file_chunks = self.chunk_text(content)
-            chunks.extend(file_chunks)
+
+            for chunk in file_chunks:
+                chunks.append(
+                    {
+                        "text": chunk["text"],
+                        "source": file.name,
+                        "section": chunk["section"],
+                    }
+                )
 
         return chunks
 
@@ -35,43 +43,81 @@ class RAG:
             file.name: file.stat().st_mtime for file in self.documents_path.glob("*.md")
         }
 
-    def chunk_text(
-        self,
-        text: str,
-        chunk_size: int = 500,
-    ) -> list[str]:
-        words = text.split()
-        chunks = []
+    def chunk_text(self, text: str) -> list[dict]:
+        sections = []
+        current_section = []
+        current_title = "Document"
 
-        for i in range(0, len(words), chunk_size):
-            chunk = " ".join(words[i : i + chunk_size])
-            chunks.append(chunk)
+        for line in text.splitlines():
+            if line.startswith("#"):
+                if current_section:
+                    sections.append(
+                        {
+                            "text": "\n".join(current_section).strip(),
+                            "section": current_title,
+                        }
+                    )
+                    current_section = []
 
-        return chunks
+                current_title = line.lstrip("#").strip()
 
-    
+            current_section.append(line)
+
+        if current_section:
+            sections.append(
+                {
+                    "text": "\n".join(current_section).strip(),
+                    "section": current_title,
+                }
+            )
+
+        return [section for section in sections if section["text"]]
+
     # Create embeddings for our documents
     def _build_index(self):
         current_timestamps = self._document_timestamps()
 
         if self.INDEX_PATH.exists():
             print("RAG: Loading existing embedding index...")
-            data = json.loads(self.INDEX_PATH.read_text(encoding="utf-8"))
-            saved_timestamps = data.get("documents", {})
 
-            if saved_timestamps == current_timestamps:
-                self._chunks = data["chunks"]
-                self._embeddings = data["embeddings"]
-                print(f"RAG: Loaded {len(self._chunks)} chunks " "from index.")
-                return
-            print("RAG: Documents changed. Rebuilding index...")
+            try:
+                data = json.loads(self.INDEX_PATH.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                print("RAG: Existing index is invalid. " "Rebuilding index...")
+                data = None
+
+            if data is not None:
+                saved_timestamps = data.get("documents", {})
+
+                if saved_timestamps == current_timestamps:
+                    chunks = data.get("chunks", [])
+
+                    index_has_sections = all(
+                        isinstance(chunk, dict) and "section" in chunk
+                        for chunk in chunks
+                    )
+
+                    if index_has_sections:
+                        self._chunks = chunks
+                        self._embeddings = data["embeddings"]
+
+                        print(
+                            f"RAG: Loaded {len(self._chunks)} chunks "
+                            "from index."
+                        )
+                        return
+
+                    print(
+                        "RAG: Existing index has outdated chunk metadata. "
+                        "Rebuilding index..."
+                    )
 
         self._chunks = self.load_documents()
 
         print(f"RAG: Creating embeddings for " f"{len(self._chunks)} chunks...")
 
         self._embeddings = [
-            self.embedding_client.embed(chunk) for chunk in self._chunks
+            self.embedding_client.embed(chunk["text"]) for chunk in self._chunks
         ]
 
         self.INDEX_PATH.parent.mkdir(
@@ -92,7 +138,6 @@ class RAG:
 
         print("RAG: Embedding index saved.")
 
-
     # Compare two vectors
     def _cosine_similarity(
         self,
@@ -111,26 +156,23 @@ class RAG:
         return dot_product / (magnitude_a * magnitude_b)
 
     def search(
-        self,
-        query: str,
-        top_k: int = 3,
-        similarity_threshold: float = 0.5,
-    ) -> list[str]:
-
+    self,
+    query: str,
+    top_k: int = 3,
+    similarity_threshold: float = 0.5,
+    ) -> list[dict]:
         query_embedding = self.embedding_client.embed(query)
         scored_chunks = []
 
-        for chunk, embedding in zip(
-            self._chunks,
-            self._embeddings,
-        ):
+        for chunk, embedding in zip(self._chunks, self._embeddings):
+            similarity = self._cosine_similarity(query_embedding, embedding)
 
-            similarity = self._cosine_similarity(
-                query_embedding,
-                embedding,
+            print(
+                f"RAG similarity: {similarity:.3f} "
+                f"| {chunk['source']} "
+                f"| {chunk['section']} "
+                f"| {chunk['text'][:80]}"
             )
-
-            print(f"RAG similarity: {similarity:.3f} " f"| {chunk[:80]}")
 
             if similarity >= similarity_threshold:
                 scored_chunks.append((similarity, chunk))
@@ -140,4 +182,10 @@ class RAG:
             reverse=True,
         )
 
-        return [chunk for _, chunk in scored_chunks[:top_k]]
+        return [
+            {
+                "score": similarity,
+                **chunk,
+            }
+            for similarity, chunk in scored_chunks[:top_k]
+        ]

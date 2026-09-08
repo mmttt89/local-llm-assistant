@@ -354,11 +354,11 @@ The project is being developed incrementally.
 * Basic RAG integration
 * Token and response-time monitoring
 * Persistent embedding index
+* Better document chunking
+* Document metadata
 
 🔨 Next
 
-* Better document chunking
-* Document metadata
 * Improved retrieval/ranking
 * RAG evaluation
 * Persistent vector database
